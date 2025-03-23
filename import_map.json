@@ -1,0 +1,6 @@
+{
+  "imports": {
+    "webtorrent": "https://esm.sh/webtorrent@1.8.0",
+    "std/": "https://deno.land/std@0.140.0/"
+  }
+}
