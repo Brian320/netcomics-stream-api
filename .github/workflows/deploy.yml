@@ -31,6 +31,6 @@ jobs:
         with:
           project: "nc-stream-api"
           entrypoint: "main.ts"
-          root: "/"
-          include: main.ts, deno.json, import_map.json
-          exclude: node_modules/, .git/, .github/, tests/
+          root: "."
+          
+          
