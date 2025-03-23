@@ -1,0 +1,12 @@
+{
+  "type": "module",
+  "name": "netcomics-stream-api",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "webtorrent": "^1.8.0",
+    "parse-torrent": "^7.0.0"
+  }
+}
