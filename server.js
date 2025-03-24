@@ -1,9 +1,9 @@
-import express from 'express';
+import { Hono } from 'hono';
+import { serve } from '@hono/node-server';
 import WebTorrent from 'webtorrent';
 import parseTorrent from 'parse-torrent';
-import { pipeline } from 'node:stream/promises';
 
-const app = express();
+const app = new Hono();
 const client = new WebTorrent();
 const port = process.env.PORT || 1111;
 
@@ -11,7 +11,7 @@ const port = process.env.PORT || 1111;
 const ACTIVE_CONNECTIONS = new Map();
 const ACTIVE_CONECTIONS_CLEANUP_TIME = 5000;
 const PEERS_TIMEOUT = 60000;
-const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
+const CHUNK_SIZE = 5 * 1024 * 1024;
 const TRACKERS = [
     'wss://tracker.openwebtorrent.com',
     'udp://tracker.opentrackr.org:1337/announce',
@@ -24,134 +24,137 @@ const TRACKERS = [
     'udp://tracker.torrent.eu.org:451/announce',
 ];
 
-// Función para mejorar magnet links
 function enhanceMagnet(magnet) {
-  const parsed = parseTorrent(magnet);
-  parsed.tr = [...new Set([...TRACKERS, ...(parsed.tr || [])])];
-  return parseTorrent.toMagnetURI(parsed);
+    const parsed = parseTorrent(magnet);
+    parsed.tr = [...new Set([...TRACKERS, ...(parsed.tr || [])])];
+    return parseTorrent.toMagnetURI(parsed);
 }
 
-app.get('/stream', async (req, res) => {
-  const connectionId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  let readStream = null;
+app.get('/stream', async (c) => {
+    const connectionId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    let readStream = null;
 
-  try {
-    // 1. Validar y mejorar magnet link
-    const magnet = req.query.magnet;
-    if (!magnet) throw new Error('Magnet link requerido');
-    
-    const enhancedMagnet = enhanceMagnet(magnet);
-    const parsed = parseTorrent(enhancedMagnet);
-    const infoHash = parsed.infoHash.toUpperCase();
+    try {
+        const magnet = c.req.query('magnet');
+        if (!magnet) throw new Error('Magnet link requerido');
 
-    // 2. Gestionar torrent
-    const torrent = client.get(infoHash) || client.add(enhancedMagnet, {
-      destroyStoreOnDestroy: true,
-      strategy: 'sequential',
-      dht: false // Mejor rendimiento para streaming
-    });
+        const enhancedMagnet = enhanceMagnet(magnet);
+        const parsed = parseTorrent(enhancedMagnet);
+        const infoHash = parsed.infoHash.toUpperCase();
 
-    // 3. Esperar metadata con control de estado
-    await new Promise((resolve, reject) => {
-      if (torrent.ready) return resolve();
-      
-      torrent.once('ready', resolve);
-      torrent.once('error', reject);
-      
-      setTimeout(() => {
-        torrent.removeListener('ready', resolve);
-        torrent.removeListener('error', reject);
-        reject(new Error('Timeout: No se encontraron peers'));
-      }, PEERS_TIMEOUT);
-    });
+        const torrent = client.get(infoHash) || client.add(enhancedMagnet, {
+            destroyStoreOnDestroy: true,
+            strategy: 'sequential',
+            dht: false
+        });
 
-    // 4. Seleccionar archivo de video
-    const videoFile = torrent.files.find(f => 
-      /\.(mp4|mkv|webm|avi)$/i.test(f.name)
-    ) || torrent.files[0];
+        await new Promise((resolve, reject) => {
+            if (torrent.ready) return resolve();
 
-    if (!videoFile) throw new Error('Archivo de video no encontrado');
+            torrent.once('ready', resolve);
+            torrent.once('error', reject);
 
-    // 5. Configurar headers dinámicos
-    const fileSize = videoFile.length;
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Content-Length', fileSize);
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET');
+            setTimeout(() => {
+                torrent.removeListener('ready', resolve);
+                torrent.removeListener('error', reject);
+                reject(new Error('Timeout: No se encontraron peers'));
+            }, PEERS_TIMEOUT);
+        });
 
-    // 6. Manejar Range requests con validación
-    let start = 0;
-    let end = fileSize - 1;
-    
-    if (req.headers.range) {
-      const range = req.headers.range.replace(/bytes=/, '');
-      [start, end] = range.split('-').map(Number);
-      
-      // Validar rangos
-      if (start >= fileSize || end >= fileSize) {
-        res.status(416).header('Content-Range', `bytes */${fileSize}`).end();
-        return;
-      }
-      
-      end = end || Math.min(start + CHUNK_SIZE, fileSize - 1);
-      
-      res.writeHead(206, {
-        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-        'Content-Length': end - start + 1
-      });
-    }
+        const videoFile = torrent.files.find(f => 
+            /\.(mp4|mkv|webm|avi)$/i.test(f.name)
+        ) || torrent.files[0];
 
-    // 7. Crear stream con gestión de ciclo de vida
-    readStream = videoFile.createReadStream({ start, end });
-    ACTIVE_CONNECTIONS.set(connectionId, { readStream, res });
+        if (!videoFile) throw new Error('Archivo de video no encontrado');
 
-    // 8. Manejo avanzado de cierre
-    const cleanUp = () => {
-      if (readStream && !readStream.destroyed) {
-        readStream.destroy();
+        const fileSize = videoFile.length;
+        const headers = {
+            'Accept-Ranges': 'bytes',
+            'Content-Type': 'video/mp4',
+            'Content-Length': fileSize.toString(),
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET'
+        };
+
+        let start = 0;
+        let end = fileSize - 1;
+        const rangeHeader = c.req.header('range');
+
+        if (rangeHeader) {
+            const range = rangeHeader.replace(/bytes=/, '');
+            [start, end] = range.split('-').map(Number);
+
+            if (start >= fileSize || end >= fileSize) {
+                return c.text('Range Not Satisfiable', 416, {
+                    headers: { 'Content-Range': `bytes */${fileSize}` }
+                });
+            }
+
+            end = end || Math.min(start + CHUNK_SIZE, fileSize - 1);
+            headers['Content-Range'] = `bytes ${start}-${end}/${fileSize}`;
+            headers['Content-Length'] = (end - start + 1).toString();
+        }
+
+        readStream = videoFile.createReadStream({ start, end });
+        ACTIVE_CONNECTIONS.set(connectionId, { readStream });
+
+        const cleanUp = (error = null) => {
+            if (readStream && !readStream.destroyed) {
+                readStream.destroy(error || undefined);
+                ACTIVE_CONNECTIONS.delete(connectionId);
+            }
+        };
+
+        c.req.raw.signal.addEventListener('abort', () => cleanUp(new Error('Client aborted')));
+
+        return new Response(
+            new ReadableStream({
+                start(controller) {
+                    readStream.on('data', (chunk) => controller.enqueue(chunk));
+                    readStream.on('end', () => controller.close());
+                    readStream.on('error', (err) => {
+                        cleanUp(err);
+                        controller.error(err);
+                    });
+                },
+                cancel() {
+                    cleanUp();
+                }
+            }),
+            {
+                status: rangeHeader ? 206 : 200,
+                headers: headers
+            }
+        );
+
+    } catch (error) {
+        console.error(`[${connectionId}] Error:`, error.message);
+        if (readStream && !readStream.destroyed) readStream.destroy();
         ACTIVE_CONNECTIONS.delete(connectionId);
-      }
-    };
-
-    req.on('close', cleanUp);
-    res.on('finish', cleanUp);
-
-    // 9. Pipeline seguro con manejo de errores
-    await pipeline(
-      readStream,
-      res
-    ).catch(err => {
-      if (!err.message.includes('premature close')) {
-        throw err;
-      }
-    });
-
-  } catch (error) {
-    console.error(`[${connectionId}] Error:`, error.message);
-    if (!res.headersSent) {
-      res.status(500).send(
-        error.message.includes('Timeout') ? 
-        'El contenido no está disponible' : 
-        'Error en el servidor'
-      );
+        
+        return c.text(
+            error.message.includes('Timeout') || error.message.includes('Client aborted') 
+                ? 'Conexión interrumpida' 
+                : 'Error en el servidor',
+            error.message.includes('Timeout') ? 504 : 500
+        );
     }
-    if (readStream && !readStream.destroyed) readStream.destroy();
-    ACTIVE_CONNECTIONS.delete(connectionId);
-  }
 });
 
-// Limpieza agresiva de conexiones
+// Limpieza de conexiones
 setInterval(() => {
-  ACTIVE_CONNECTIONS.forEach((conn, id) => {
-    if (conn.res.destroyed || conn.readStream.destroyed) {
-      conn.readStream.destroy();
-      ACTIVE_CONNECTIONS.delete(id);
-    }
-  });
-}, ACTIVE_CONECTIONS_CLEANUP_TIME); // Cada 5 segundos
+    ACTIVE_CONNECTIONS.forEach((conn, id) => {
+        if (conn.readStream.destroyed || conn.readStream.closed) {
+            conn.readStream.destroy();
+            ACTIVE_CONNECTIONS.delete(id);
+        }
+    });
+}, ACTIVE_CONECTIONS_CLEANUP_TIME);
 
-app.listen(port, () => {
-  console.log(`Servidor escuchando en el puerto ${port}`);
-  console.log(`Conexiones activas: ${ACTIVE_CONNECTIONS.size}`);
+serve({
+    fetch: app.fetch,
+    port
+}, () => {
+    console.log(`Servidor escuchando en el puerto ${port}`);
+    console.log(`Conexiones activas: ${ACTIVE_CONNECTIONS.size}`);
 });
