@@ -151,6 +151,10 @@ app.get('/stream', async (c) => {
     }
 });
 
+app.get('/health', async (c) => {
+    return c.text('OK', 200);
+});
+
 // Limpieza de conexiones
 setInterval(() => {
     ACTIVE_CONNECTIONS.forEach((conn, id) => {
