@@ -4,7 +4,17 @@ import WebTorrent from 'webtorrent';
 import parseTorrent from 'parse-torrent';
 
 const app = new Hono();
-const client = new WebTorrent();
+// const client = new WebTorrent();
+const client = new WebTorrent({
+    dht: {
+        host: '0.0.0.0', // Escuchar en todas las interfaces
+        port: 6881
+    },
+    tracker: {
+        udp: false, // Oracle bloquea UDP para trackers
+        ws: true    // Usar WebSocket trackers
+    }
+});
 const port = process.env.PORT || 1111;
 
 // Configuración Avanzada
